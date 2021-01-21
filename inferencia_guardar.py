@@ -21,14 +21,14 @@ try:
 except IndexError:
     pass
 try:
-    sys.path.append('/home/nubol23/Desktop/Codes/Tesis/NNTrain/Drive')
-    sys.path.append('/home/nubol23/Desktop/Codes/Tesis/Train/Depth')
-    sys.path.append('/home/nubol23/Desktop/Codes/Tesis/NNTrain/Segmentation')
+    sys.path.append('NN/DriveNet')
+    sys.path.append('NN/DepthNet')
+    sys.path.append('NN/SemsegNet')
 except IndexError:
     pass
     
 from utils.sync_mode import CarlaSyncMode
-from custom_mobilenet import CustomMobileNet, CustomMobileNetExt
+from custom_mobilenet import CustomMobileNet
 from models import CustomMobilenetDepth
 from semseg_model import CustomMobilenetSemseg
 from utils.constants import junction_data, contours, directions, weather_idxs
@@ -162,7 +162,7 @@ def steer_correction(action, mutable_params, threshold):
             # clip del valor             
             mutable_params['s'] = max(mutable_params['s'], -0.8)
             # acumular el incremento 0.02                      
-            mutable_params['ac'] += 0.02          
+            mutable_params['ac'] += 0.025          
         else:
             # Si está en rango se reinicia
             mutable_params['ac'] = 0              
@@ -175,7 +175,7 @@ def steer_correction(action, mutable_params, threshold):
             mutable_params['s'] = threshold
             mutable_params['s'] += mutable_params['ac']
             mutable_params['s'] = min(mutable_params['s'], 0.8)
-            mutable_params['ac'] += 0.02
+            mutable_params['ac'] += 0.025
         else:
             mutable_params['ac'] = 0
         ema_str = ''
@@ -303,12 +303,18 @@ def find_contours(img, directions, x_min_thresh=0, pad=1, copy=True):
     return boxes
 
 def main():
+    n_run = 11
+    
+    os.makedirs(f'/home/nubol23/Documents/ResultsData/Run{n_run}/big_img')
+    os.makedirs(f'/home/nubol23/Documents/ResultsData/Run{n_run}/small_img')
+
     actor_list = []
     pygame.init()
 
     w, h = 240, 180
 
-    display = pygame.display.set_mode((2*w, 2*h), pygame.HWSURFACE | pygame.DOUBLEBUF)
+    #display = pygame.display.set_mode((2*w, 2*h), pygame.HWSURFACE | pygame.DOUBLEBUF)
+    display = pygame.display.set_mode((w, h), pygame.HWSURFACE | pygame.DOUBLEBUF)
     clock = pygame.time.Clock()
 
     try:
@@ -333,9 +339,18 @@ def main():
                                    lib=blueprint_library,
                                    world=world)
         actor_list.append(camera_rgb)
+        
+        cam_2 = carla.Transform(carla.Location(x=1.6, z=1.7))
+        camera_big = create_camera(cam_type='rgb',
+                                   vehicle=player,
+                                   pos=cam_pos,
+                                   h=h*2, w=w*2,
+                                   lib=blueprint_library,
+                                   world=world)
+        actor_list.append(camera_big)
     
         model_depth = load_network(CustomMobilenetDepth, 
-                                   '/home/nubol23/Desktop/Codes/Tesis/Train/Depth/weights/c_mob_20.pth.tar',
+                                   'NN/DepthNet/c_mob_20.pth.tar',
                                    (180, 240), False)
                                    
         normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
@@ -347,7 +362,7 @@ def main():
         ])
         
         model_drive = load_network(CustomMobileNet, 
-                                   '/home/nubol23/Desktop/Codes/Tesis/NNTrain/Drive/weights/mob_drive_24.pth.tar')
+                                   'NN/DriveNet/mob_drive_24.pth.tar')
         
         drive_preprocess = transforms.Compose([
             transforms.Resize((224, 224), interpolation=Image.BICUBIC),
@@ -355,16 +370,16 @@ def main():
         ])
         
         model_semseg = load_network(CustomMobilenetSemseg,
-                                    '/home/nubol23/Desktop/Codes/Tesis/NNTrain/Segmentation/weights/s_mob_7.pth.tar',
+                                    'NN/SemsegNet/s_mob_7.pth.tar',
                                     (180, 240), False)
         
-        with CarlaSyncMode(world, camera_rgb, fps=30) as sync_mode:
+        with CarlaSyncMode(world, camera_rgb, camera_big, fps=30) as sync_mode:
             road_id, lane_id = 0, 0
             action = [0, 0, 0, 1]
             
             # ema inicializado en None
             # ac: acumulador del incremento forzado de giro si no se tiene reacción inmediata
-            mutable_params = {'ema': None, 'alpha': 0.75, 'ac': 0, 's': None, 't': None, 'b': 0}
+            mutable_params = {'ema': None, 'alpha': 0.70, 'ac': 0, 's': None, 't': None, 'b': 0}
             
             # límite del rango para aplicar EMA
             threshold = 0.2
@@ -374,16 +389,18 @@ def main():
             color_code = ['r', 'g', 'b']
             
             # Iterando por la simulación
+            frame = 0
             while True:
                 if should_quit():
                     return
                 clock.tick()
 
                 # Avanzar un tick de la simulación
-                snapshot, image_rgb = sync_mode.tick(timeout=2.0)
+                snapshot, image_rgb, image_big = sync_mode.tick(timeout=2.0)
 
                 # Convertir a un arreglo BGR
                 rgb_arr = img_to_array(image_rgb)
+                big_arr = img_to_array(image_big)
 
                 # Convertir a RGB
                 X_img = Image.fromarray(cv2.cvtColor(rgb_arr, cv2.COLOR_BGR2RGB))
@@ -402,6 +419,7 @@ def main():
                 
                 # throttle, steer prediction
                 mutable_params['t'], mutable_params['s'] = round(float(pred_drive[0, 0]), 3), round(float(pred_drive[0, 1]), 3)
+                prev_s = mutable_params['s']
                 # Clip de la aceleración para evitar carrera
                 mutable_params['t'] = min(mutable_params['t'], 0.5)
                 
@@ -412,9 +430,9 @@ def main():
                 vehicles = get_class_semseg(segmentation, 10)
                 poles = get_class_semseg(segmentation, 5)
                 
-                v_boxes = find_contours(vehicles, directions, pad=1, copy=True)
-                w_boxes = find_contours(walkers, directions, pad=1, copy=True)
-                p_boxes = find_contours(poles, directions, pad=1, copy=True)
+                # v_boxes = find_contours(vehicles, directions, pad=1, copy=True)
+                # w_boxes = find_contours(walkers, directions, pad=1, copy=True)
+                # p_boxes = find_contours(poles, directions, pad=1, copy=True)
                 
                 objects_depth = extract_objects_depth(depth_map, contours, vehicles, poles, walkers)
                 
@@ -433,7 +451,7 @@ def main():
                 
                 if moda <= 4 and 40 <= count < np.inf:
                     mutable_params['s'], mutable_params['t'] = 0, 0
-                    mutable_params['b'] += 0.10
+                    mutable_params['b'] += 0.15
                     mutable_params['b'] = round(min(max(0, mutable_params['b']), 1), 3)
                 else:
                     mutable_params['b'] = 0
@@ -464,38 +482,44 @@ def main():
                                                           steer= mutable_params['s'], 
                                                           brake= mutable_params['b']))
                 
-                line1 = f"t: {round(mutable_params['t'], 2)} b: {round(mutable_params['b'], 2)} s: {round(mutable_params['s'], 2)} color: {code_val}"
-                line2 = f"moda: {moda}, r: {int(rc>0)} g: {int(gc>0)} b: {int(bc>0)}"
-                line3 = f"act: {action_str} {action}"                
-                rgb_arr = cv2.resize(rgb_arr, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-                cv2.putText(rgb_arr, line1, (10, 30), font, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
-                cv2.putText(rgb_arr, line1, (10, 30), font, 0.6, (156, 237, 58), 1, cv2.LINE_AA)
-                cv2.putText(rgb_arr, line2, (10, 60), font, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
-                cv2.putText(rgb_arr, line2, (10, 60), font, 0.6, (156, 237, 58), 1, cv2.LINE_AA)
-                cv2.putText(rgb_arr, line3, (10, 90), font, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
-                cv2.putText(rgb_arr, line3, (10, 90), font, 0.6, (156, 237, 58), 1, cv2.LINE_AA)
+                # line1 = f"t: {round(mutable_params['t'], 2)} b: {round(mutable_params['b'], 2)} s: {round(mutable_params['s'], 2)} color: {code_val}"
+                # line2 = f"moda: {moda}, r: {int(rc>0)} g: {int(gc>0)} b: {int(bc>0)}"
+                # line3 = f"act: {action_str} {action}"                
+                # rgb_arr = cv2.resize(rgb_arr, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+                # cv2.putText(rgb_arr, line1, (10, 30), font, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
+                # cv2.putText(rgb_arr, line1, (10, 30), font, 0.6, (156, 237, 58), 1, cv2.LINE_AA)
+                # cv2.putText(rgb_arr, line2, (10, 60), font, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
+                # cv2.putText(rgb_arr, line2, (10, 60), font, 0.6, (156, 237, 58), 1, cv2.LINE_AA)
+                # cv2.putText(rgb_arr, line3, (10, 90), font, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
+                # cv2.putText(rgb_arr, line3, (10, 90), font, 0.6, (156, 237, 58), 1, cv2.LINE_AA)
                 
-                if not isinstance(box, type(None)):
-                    color = (58, 58, 237) if code_val == 'r' else (58, 237, 67)
-                    cv2.rectangle(rgb_arr, (box[0]*2, box[1]*2), ((box[0]+box[2])*2, (box[1]+box[3])*2), color, 2)
+                #if not isinstance(box, type(None)):
+                #    color = (58, 58, 237) if code_val == 'r' else (58, 237, 67)
+                #    cv2.rectangle(rgb_arr, (box[0]*2, box[1]*2), ((box[0]+box[2])*2, (box[1]+box[3])*2), color, 2)
                     
-                for x1, y1, x2, y2 in v_boxes:
+                #for x1, y1, x2, y2 in v_boxes:
                     # bgr color
-                    cv2.rectangle(rgb_arr, (x1*2, y1*2), (x2*2, y2*2), (237, 152, 58), 2)
-                for x1, y1, x2, y2 in p_boxes:
-                    cv2.rectangle(rgb_arr, (x1*2, y1*2), (x2*2, y2*2), (115, 58, 237), 2)
-                for x1, y1, x2, y2 in w_boxes:
-                    cv2.rectangle(rgb_arr, (x1*2, y1*2), (x2*2, y2*2), (58, 161, 237), 2)
+                #    cv2.rectangle(rgb_arr, (x1*2, y1*2), (x2*2, y2*2), (237, 152, 58), 2)
+                #for x1, y1, x2, y2 in p_boxes:
+                #    cv2.rectangle(rgb_arr, (x1*2, y1*2), (x2*2, y2*2), (115, 58, 237), 2)
+                #for x1, y1, x2, y2 in w_boxes:
+                #    cv2.rectangle(rgb_arr, (x1*2, y1*2), (x2*2, y2*2), (58, 161, 237), 2)
                     
                 show_window(display, rgb_arr)
                 # graficar el semáforo segmentado
-                if not isinstance(k_img, type(None)):
-                    k_img = cv2.cvtColor(k_img, cv2.COLOR_RGB2BGR)
-                    k_img = cv2.resize(k_img, (31, 55), interpolation=cv2.INTER_CUBIC)
-                    show_window(display, 
-                        k_img,
-                        (rgb_arr.shape[1]-k_img.shape[1], 0))
+                #if not isinstance(k_img, type(None)):
+                #    k_img = cv2.cvtColor(k_img, cv2.COLOR_RGB2BGR)
+                #    k_img = cv2.resize(k_img, (31, 55), interpolation=cv2.INTER_CUBIC)
+                #    show_window(display, 
+                #        k_img,
+                #        (rgb_arr.shape[1]-k_img.shape[1], 0))
                 pygame.display.flip()
+                
+                pos_s = mutable_params['s']
+                cv2.imwrite(f'/home/nubol23/Documents/ResultsData/Run{n_run}/small_img/{frame}_{str(action)}_{prev_s}_{pos_s}.png', rgb_arr)
+                cv2.imwrite(f'/home/nubol23/Documents/ResultsData/Run{n_run}/big_img/{frame}.jpeg', big_arr)
+                
+                frame += 1
     finally:
         print('destroying actors.')
         for actor in actor_list:
