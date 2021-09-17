@@ -1,4 +1,4 @@
-# sdc-bsc-thesis
+# Self driving car thesis
 
 1. Descargar CARLA
 2. Abrir el simulador
