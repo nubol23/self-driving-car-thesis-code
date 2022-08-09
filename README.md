@@ -1,5 +1,7 @@
 # Self driving car thesis
 
+This repository contains the trained models and scripts necessary to run my undergrad thesis project, which consists of a self driving system in CARLA simulator with neural networks.
+
 1. Descargar CARLA
 2. Abrir el simulador
 3. Ejecutar el script `change_world.py
